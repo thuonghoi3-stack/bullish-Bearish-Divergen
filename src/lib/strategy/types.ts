@@ -7,6 +7,9 @@ export type Candle = {
   v: number;
 };
 
+export type DivergenceKind = "regular" | "hidden";
+export type FamilyFilter = "regular" | "hidden" | "both";
+
 export type Bar = Candle & {
   rsi: number | null;
   closeMax: number | null;
@@ -15,7 +18,11 @@ export type Bar = Candle & {
   rsiMin: number | null;
   bearishDivergence: boolean;
   bullishDivergence: boolean;
+  hiddenBullish: boolean;
+  hiddenBearish: boolean;
   signalStart: boolean;
+  hiddenBullStart: boolean;
+  hiddenBearStart: boolean;
   ret5: number | null;
   ret10: number | null;
   ret20: number | null;
@@ -26,10 +33,12 @@ export type Signal = {
   index: number;
   t: number;
   type: "bullish" | "bearish";
+  kind: DivergenceKind;
   close: number;
   rsi: number;
   closeExtreme: number;
   rsiExtreme: number;
+  strength: number;
   ret5: number | null;
   ret10: number | null;
   ret20: number | null;
@@ -38,6 +47,8 @@ export type Signal = {
 export type StrategyStats = {
   bullish: number;
   bearish: number;
+  hidden: number;
+  regular: number;
   total: number;
   hit5: number | null;
   avgRet5Bull: number | null;
@@ -51,4 +62,17 @@ export type MarketPayload = {
   source: "binance" | "synthetic";
   fetchedAt: number;
   candles: Candle[];
+};
+
+export type EquityPoint = {
+  t: number;
+  equity: number;
+};
+
+export type PaperBook = {
+  points: EquityPoint[];
+  trades: number;
+  maxDd: number;
+  end: number;
+  avg: number | null;
 };

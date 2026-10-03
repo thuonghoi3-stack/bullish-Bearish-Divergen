@@ -10,8 +10,8 @@ import { generateSynthetic } from "../strategy/synthetic";
 import type { Candle, MarketPayload } from "../strategy/types";
 
 const BINANCE_ENDPOINTS = [
-  "https://api.binance.com/api/v3/klines",
   "https://data-api.binance.vision/api/v3/klines",
+  "https://api.binance.com/api/v3/klines",
 ];
 
 async function fetchFromBinance(

@@ -31,11 +31,12 @@ export function generateSynthetic(
   now = Date.now(),
 ): Candle[] {
   const meta = SYMBOLS.find((s) => s.id === symbol) ?? SYMBOLS[0];
-  const tf = INTERVALS.find((s) => s.id === interval) ?? INTERVALS[1];
+  const tf = INTERVALS.find((s) => s.id === interval) ?? INTERVALS.find((s) => s.id === "1h")!;
   const rng = mulberry32(hashString(`${meta.id}:${tf.id}:v3`));
   const step = tf.ms;
   const aligned = Math.floor(now / step) * step;
-  const hourScale = Math.sqrt(step / INTERVALS[1].ms);
+  const hourMs = INTERVALS.find((s) => s.id === "1h")!.ms;
+  const hourScale = Math.sqrt(step / hourMs);
   const vol = 0.0075 * hourScale;
 
   let price = meta.seed * (0.92 + rng() * 0.16);

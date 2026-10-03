@@ -14,7 +14,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Dashboard chiến lược phân kỳ giá/RSI — lookback 20, tín hiệu bullish và bearish divergence.",
+          "Radar phân kỳ giá/RSI trên 8 cặp spot — tín hiệu thường và ẩn, sức mạnh, sổ mô phỏng.",
       },
       { name: "theme-color", content: "#0b0c0e" },
     ],

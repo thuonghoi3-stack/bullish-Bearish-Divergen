@@ -35,12 +35,9 @@ export function compactPrice(n: number): string {
   return n.toPrecision(2);
 }
 
-export function formatTime(ts: number, interval: string): string {
+export function formatTime(ts: number, _interval: string): string {
   const d = new Date(ts);
   const pad = (v: number) => String(v).padStart(2, "0");
-  if (interval === "1d") {
-    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-  }
   return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 

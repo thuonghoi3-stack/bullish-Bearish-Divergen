@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 import {
   Activity,
   ArrowDownRight,
@@ -10,7 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -27,40 +26,75 @@ import {
   type SymbolId,
 } from "@/lib/market/constants";
 import { fetchKlines } from "@/lib/market/fetch-klines";
-import { generateSynthetic, runDivergence, type Signal } from "@/lib/strategy";
+import {
+  generateSynthetic,
+  runDivergence,
+  simulateHold,
+  summarizeSignals,
+  type Bar,
+  type FamilyFilter,
+  type Signal,
+} from "@/lib/strategy";
 import { cn, formatFullTime, formatPct, formatPrice, formatRsi, formatTime } from "@/lib/utils";
 import { DeskCharts } from "./charts";
+import { EquityChart } from "./equity-chart";
+import { PairRadar, type RadarCardModel } from "./radar";
 
-const STORAGE_KEY = "phan-ky-desk-v1";
+const STORAGE_KEY = "phan-ky-desk-v2";
+const STORAGE_KEY_V1 = "phan-ky-desk-v1";
 
 type Filter = "all" | "bullish" | "bearish";
 type Range = "recent" | "all";
+type StrengthFloor = 0 | 50 | 70;
 
 type Persisted = {
   symbol: SymbolId;
   interval: IntervalId;
   lookback: number;
   rsiPeriod: number;
+  family: FamilyFilter;
+  minStrength: StrengthFloor;
+  hold: number;
 };
 
+function isFamily(v: string): v is FamilyFilter {
+  return v === "regular" || v === "hidden" || v === "both";
+}
+
+function strengthFloor(n: number): StrengthFloor {
+  if (n >= 70) return 70;
+  if (n >= 50) return 50;
+  return 0;
+}
+
 function loadPersisted(): Persisted {
+  const fallback: Persisted = {
+    symbol: DEFAULT_SYMBOL,
+    interval: DEFAULT_INTERVAL,
+    lookback: DEFAULT_LOOKBACK,
+    rsiPeriod: DEFAULT_RSI_PERIOD,
+    family: "both",
+    minStrength: 0,
+    hold: 5,
+  };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) throw new Error("empty");
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY_V1);
+    if (!raw) return fallback;
     const p = JSON.parse(raw) as Partial<Persisted>;
+    const symbolRaw = p.symbol ?? "";
+    const intervalRaw = p.interval ?? "";
+    const familyRaw = p.family ?? "";
     return {
-      symbol: isSymbol(p.symbol ?? "") ? (p.symbol as SymbolId) : DEFAULT_SYMBOL,
-      interval: isInterval(p.interval ?? "") ? (p.interval as IntervalId) : DEFAULT_INTERVAL,
+      symbol: isSymbol(symbolRaw) ? symbolRaw : DEFAULT_SYMBOL,
+      interval: isInterval(intervalRaw) ? intervalRaw : DEFAULT_INTERVAL,
       lookback: clamp(Number(p.lookback) || DEFAULT_LOOKBACK, 5, 60),
       rsiPeriod: clamp(Number(p.rsiPeriod) || DEFAULT_RSI_PERIOD, 5, 28),
+      family: isFamily(familyRaw) ? familyRaw : "both",
+      minStrength: strengthFloor(Number(p.minStrength) || 0),
+      hold: clamp(Number(p.hold) || 5, 3, 20),
     };
   } catch {
-    return {
-      symbol: DEFAULT_SYMBOL,
-      interval: DEFAULT_INTERVAL,
-      lookback: DEFAULT_LOOKBACK,
-      rsiPeriod: DEFAULT_RSI_PERIOD,
-    };
+    return fallback;
   }
 }
 
@@ -78,6 +112,9 @@ export function DeskApp() {
   const [interval, setInterval] = useState<IntervalId>(DEFAULT_INTERVAL);
   const [lookback, setLookback] = useState(DEFAULT_LOOKBACK);
   const [rsiPeriod, setRsiPeriod] = useState(DEFAULT_RSI_PERIOD);
+  const [family, setFamily] = useState<FamilyFilter>("both");
+  const [minStrength, setMinStrength] = useState<StrengthFloor>(0);
+  const [hold, setHold] = useState(5);
   const [filter, setFilter] = useState<Filter>("all");
   const [range, setRange] = useState<Range>("recent");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -89,6 +126,9 @@ export function DeskApp() {
     setInterval(p.interval);
     setLookback(p.lookback);
     setRsiPeriod(p.rsiPeriod);
+    setFamily(p.family);
+    setMinStrength(p.minStrength);
+    setHold(p.hold);
     setHydrated(true);
   }, []);
 
@@ -96,32 +136,56 @@ export function DeskApp() {
     if (!hydrated) return;
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ symbol, interval, lookback, rsiPeriod } satisfies Persisted),
+      JSON.stringify({
+        symbol,
+        interval,
+        lookback,
+        rsiPeriod,
+        family,
+        minStrength,
+        hold,
+      } satisfies Persisted),
     );
-  }, [hydrated, symbol, interval, lookback, rsiPeriod]);
+  }, [hydrated, symbol, interval, lookback, rsiPeriod, family, minStrength, hold]);
 
-  const market = useQuery({
-    queryKey: ["klines", symbol, interval],
-    queryFn: () => fetchKlines({ data: { symbol, interval } }),
-    enabled: hydrated,
-    refetchInterval: 60_000,
+  const scans = useQueries({
+    queries: SYMBOLS.map((s) => ({
+      queryKey: ["klines", s.id, interval],
+      queryFn: () => fetchKlines({ data: { symbol: s.id, interval } }),
+      enabled: hydrated,
+      refetchInterval: 60_000,
+      staleTime: 30_000,
+    })),
   });
 
+  const activeScan = scans[SYMBOLS.findIndex((s) => s.id === symbol)];
+  const fetching = scans.some((q) => q.isFetching);
+
   const candles = useMemo(() => {
-    if (market.data?.candles?.length) return market.data.candles;
-    if (market.isError) return generateSynthetic(symbol, interval);
+    if (activeScan?.data?.candles?.length) return activeScan.data.candles;
+    if (activeScan?.isError) return generateSynthetic(symbol, interval);
     return [];
-  }, [market.data, market.isError, symbol, interval]);
+  }, [activeScan?.data, activeScan?.isError, symbol, interval]);
 
-  const { bars, signals, stats } = useMemo(
-    () => runDivergence(candles, lookback, rsiPeriod),
-    [candles, lookback, rsiPeriod],
+  const analyzed = useMemo(
+    () => runDivergence(candles, lookback, rsiPeriod, family),
+    [candles, lookback, rsiPeriod, family],
   );
+  const { bars } = analyzed;
 
-  const visibleSignals = useMemo(
-    () => (filter === "all" ? signals : signals.filter((s) => s.type === filter)).slice().reverse(),
+  const signals = useMemo(
+    () => analyzed.signals.filter((s) => s.strength >= minStrength),
+    [analyzed.signals, minStrength],
+  );
+  const stats = useMemo(() => summarizeSignals(signals), [signals]);
+
+  const scoped = useMemo(
+    () => (filter === "all" ? signals : signals.filter((s) => s.type === filter)),
     [signals, filter],
   );
+  const visibleSignals = useMemo(() => scoped.slice().reverse(), [scoped]);
+
+  const book = useMemo(() => simulateHold(scoped, candles, hold), [scoped, candles, hold]);
 
   const selected =
     (selectedId ? signals.find((s) => s.id === selectedId) : null) ?? stats.last ?? null;
@@ -129,7 +193,48 @@ export function DeskApp() {
   const hoverBar = hoverIndex != null ? bars[hoverIndex] : null;
   const readoutBar = hoverBar ?? (selected ? bars[selected.index] : bars[bars.length - 1]);
   const lastBar = bars[bars.length - 1];
-  const source = market.data?.source ?? (market.isError ? "synthetic" : null);
+  const source = activeScan?.data?.source ?? (activeScan?.isError ? "synthetic" : null);
+
+  const radar = useMemo<RadarCardModel[]>(() => {
+    return SYMBOLS.map((s, i) => {
+      const q = scans[i];
+      const series = q?.data?.candles?.length
+        ? q.data.candles
+        : q?.isError
+          ? generateSynthetic(s.id, interval)
+          : [];
+      if (!series.length) {
+        return {
+          id: s.id,
+          base: s.base,
+          loading: !q || q.isLoading || q.isPending,
+          synthetic: false,
+          price: "—",
+          change: null,
+          rsi: null,
+          signal: null,
+          barsAgo: null,
+        };
+      }
+      const run = runDivergence(series, lookback, rsiPeriod, family);
+      const kept = run.signals.filter((sig) => sig.strength >= minStrength);
+      const last = kept.length ? kept[kept.length - 1]! : null;
+      const tail = run.bars[run.bars.length - 1];
+      const prev = run.bars[run.bars.length - 2];
+      const change = tail && prev && prev.c ? (tail.c - prev.c) / prev.c : null;
+      return {
+        id: s.id,
+        base: s.base,
+        loading: false,
+        synthetic: (q?.data?.source ?? "synthetic") !== "binance",
+        price: tail ? formatPrice(tail.c) : "—",
+        change,
+        rsi: tail?.rsi ?? null,
+        signal: last,
+        barsAgo: last ? run.bars.length - 1 - last.index : null,
+      };
+    });
+  }, [scans, interval, lookback, rsiPeriod, family, minStrength]);
 
   function selectBar(index: number) {
     const bar = bars[index];
@@ -146,14 +251,14 @@ export function DeskApp() {
   return (
     <div className="min-h-dvh bg-background text-foreground">
       <header className="sticky top-0 z-30 border-b border-border bg-background/90 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6">
+        <div className="mx-auto flex min-w-0 max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <LogoMark />
               <div>
                 <h1 className="text-base font-medium tracking-tight">Phân Kỳ Desk</h1>
                 <p className="text-xs text-muted-foreground">
-                  Giá × RSI · lookback {lookback} · cùng logic Freqtrade
+                  Radar 8 cặp · phân kỳ thường và ẩn · lookback {lookback}
                 </p>
               </div>
             </div>
@@ -166,17 +271,19 @@ export function DeskApp() {
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => market.refetch()}
-                disabled={market.isFetching}
+                onClick={() => {
+                  scans.forEach((q) => void q.refetch());
+                }}
+                disabled={fetching}
                 aria-label="Tải lại dữ liệu"
               >
-                <RefreshCw className={cn("size-3.5", market.isFetching && "animate-spin")} />
+                <RefreshCw className={cn("size-3.5", fetching && "animate-spin")} />
                 <span className="hidden sm:inline">Làm mới</span>
               </Button>
             </div>
           </div>
 
-          <div className="flex w-full max-w-full gap-1 overflow-x-auto pb-1">
+          <div className="flex w-full min-w-0 gap-1 overflow-x-auto pb-1">
             {SYMBOLS.map((s) => {
               const active = s.id === symbol;
               return (
@@ -252,10 +359,68 @@ export function DeskApp() {
               </label>
             </div>
           </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="flex gap-1">
+              {(
+                [
+                  ["regular", "Thường"],
+                  ["hidden", "Ẩn"],
+                  ["both", "Cả hai"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setFamily(id)}
+                  className={cn(
+                    "h-10 rounded-sm px-3 text-xs font-medium transition-colors duration-[var(--motion-quick)]",
+                    family === id
+                      ? "bg-card-2 text-foreground shadow-[var(--shadow-border)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {(
+                [
+                  [0, "Mọi sức"],
+                  [50, "≥ 50"],
+                  [70, "≥ 70"],
+                ] as const
+              ).map(([floor, label]) => (
+                <button
+                  key={floor}
+                  type="button"
+                  onClick={() => setMinStrength(floor)}
+                  className={cn(
+                    "h-10 rounded-sm px-3 text-xs font-medium transition-colors duration-[var(--motion-quick)]",
+                    minStrength === floor
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 sm:px-6 lg:grid-cols-12">
+      <main className="mx-auto grid w-full min-w-0 max-w-7xl gap-4 px-4 py-4 sm:px-6 lg:grid-cols-12">
+        <PairRadar
+          cards={radar}
+          activeId={symbol}
+          onPick={(id, signalId) => {
+            setSymbol(id);
+            setSelectedId(signalId);
+          }}
+        />
+
         <section className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:col-span-12 lg:grid-cols-6">
           <Kpi
             label="Giá"
@@ -296,7 +461,7 @@ export function DeskApp() {
           <Kpi
             label="Tín hiệu cuối"
             value={stats.last ? (stats.last.type === "bullish" ? "Bull" : "Bear") : "—"}
-            hint={stats.last ? formatTime(stats.last.t, interval) : "Chưa có"}
+            hint={stats.last ? `${stats.last.kind === "hidden" ? "Ẩn" : "Thường"} · sức ${stats.last.strength}` : "Chưa có"}
             tone={stats.last?.type === "bullish" ? "bull" : stats.last?.type === "bearish" ? "bear" : undefined}
           />
         </section>
@@ -324,7 +489,7 @@ export function DeskApp() {
             </div>
           </CardHeader>
           <CardContent className="overflow-hidden pt-3">
-            {market.isLoading && !candles.length ? (
+            {(!hydrated || (activeScan?.isLoading && !candles.length)) ? (
               <div className="space-y-3">
                 <Skeleton className="chart-price rounded-lg" />
                 <Skeleton className="chart-rsi rounded-lg" />
@@ -336,6 +501,7 @@ export function DeskApp() {
                 lookback={lookback}
                 selected={selected}
                 range={range}
+                family={family}
                 onSelectIndex={selectBar}
                 onHoverIndex={setHoverIndex}
               />
@@ -348,7 +514,7 @@ export function DeskApp() {
             <CardHeader className="px-4 pt-4">
               <div>
                 <CardTitle>Tín hiệu</CardTitle>
-                <CardDescription>Chỉ lấy nến mở đầu mỗi chuỗi phân kỳ</CardDescription>
+                <CardDescription>Nến mở đầu mỗi chuỗi · lọc theo sức mạnh</CardDescription>
               </div>
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
@@ -398,11 +564,11 @@ export function DeskApp() {
                                   {s.type === "bullish" ? "Bull" : "Bear"}
                                 </Badge>
                                 <span className="font-mono text-xs text-muted-foreground">
-                                  {formatTime(s.t, interval)}
+                                  {s.kind === "hidden" ? "Ẩn" : "Thường"} · {formatTime(s.t, interval)}
                                 </span>
                               </span>
                               <span className="mt-1 font-mono text-xs tabular text-subtle">
-                                RSI {formatRsi(s.rsi)} · {formatPrice(s.close)}
+                                RSI {formatRsi(s.rsi)} · sức {s.strength}
                               </span>
                             </span>
                             <span
@@ -433,22 +599,37 @@ export function DeskApp() {
         <Card className="min-w-0 overflow-hidden lg:col-span-12">
           <CardHeader className="px-4 pt-4">
             <div>
-              <CardTitle>Sổ lệnh mô phỏng</CardTitle>
+              <CardTitle>Sổ mô phỏng không chồng lệnh</CardTitle>
               <CardDescription>
-                Lợi nhuận nến đóng cửa sau 5 / 10 / 20 bar — không phải live trading
+                Vào tại close, thoát sau {hold} nến, phí 0.10% mỗi phía.{" "}
+                {book.trades} lệnh · cuối {formatPct(book.end - 1)} · DD tối đa{" "}
+                {(book.maxDd * 100).toFixed(1)}%
               </CardDescription>
             </div>
+            <label className="flex w-full max-w-xs items-center gap-3">
+              <span className="w-16 shrink-0 text-xs text-muted-foreground">
+                Giữ <span className="font-mono tabular text-foreground">{hold}</span>
+              </span>
+              <Slider
+                min={3}
+                max={20}
+                step={1}
+                value={[hold]}
+                onValueChange={(v) => setHold(v[0] ?? 5)}
+              />
+            </label>
           </CardHeader>
           <CardContent className="overflow-x-auto pt-3">
-            <table className="w-max min-w-full text-left text-sm">
+            <EquityChart points={book.points} />
+            <table className="mt-3 w-max min-w-full text-left text-sm">
               <thead className="text-xs text-muted-foreground">
                 <tr className="border-b border-border">
                   <th className="px-3 py-2 font-medium">Thời gian</th>
                   <th className="px-3 py-2 font-medium">Loại</th>
+                  <th className="px-3 py-2 font-medium">Họ</th>
+                  <th className="px-3 py-2 font-medium">Sức</th>
                   <th className="px-3 py-2 font-medium">Giá</th>
                   <th className="px-3 py-2 font-medium">RSI</th>
-                  <th className="px-3 py-2 font-medium">Cực trị giá</th>
-                  <th className="px-3 py-2 font-medium">Cực trị RSI</th>
                   <th className="px-3 py-2 font-medium">+5</th>
                   <th className="px-3 py-2 font-medium">+10</th>
                   <th className="px-3 py-2 font-medium">+20</th>
@@ -470,10 +651,12 @@ export function DeskApp() {
                         {s.type === "bullish" ? "Bullish" : "Bearish"}
                       </Badge>
                     </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">
+                      {s.kind === "hidden" ? "Ẩn" : "Thường"}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs tabular">{s.strength}</td>
                     <td className="px-3 py-2 font-mono text-xs tabular">{formatPrice(s.close)}</td>
                     <td className="px-3 py-2 font-mono text-xs tabular">{formatRsi(s.rsi)}</td>
-                    <td className="px-3 py-2 font-mono text-xs tabular">{formatPrice(s.closeExtreme)}</td>
-                    <td className="px-3 py-2 font-mono text-xs tabular">{formatRsi(s.rsiExtreme)}</td>
                     <RetCell v={s.ret5} />
                     <RetCell v={s.ret10} />
                     <RetCell v={s.ret20} />
@@ -484,6 +667,9 @@ export function DeskApp() {
             {visibleSignals.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">Chưa có hàng để hiển thị.</p>
             ) : null}
+            <p className="px-1 pt-3 text-xs text-subtle">
+              Đây là nghiên cứu trên nến đã đóng, không phải lệnh thật và không phải khuyến nghị đầu tư.
+            </p>
           </CardContent>
         </Card>
       </main>
@@ -564,13 +750,23 @@ function FormulaPanel({
   bar,
   lookback,
 }: {
-  bar: ReturnType<typeof runDivergence>["bars"][number] | null | undefined;
+  bar: Bar | null | undefined;
   lookback: number;
 }) {
   const closeOk = bar?.closeMax != null && bar.c >= bar.closeMax;
   const rsiWeak = bar?.rsi != null && bar.rsiMax != null && bar.rsi < bar.rsiMax;
   const closeLow = bar?.closeMin != null && bar.c <= bar.closeMin;
   const rsiStrong = bar?.rsi != null && bar.rsiMin != null && bar.rsi > bar.rsiMin;
+  const hidBullPx = bar?.closeMin != null && bar.c > bar.closeMin;
+  const hidBullRsi = bar?.rsi != null && bar.rsiMin != null && bar.rsi <= bar.rsiMin;
+  const hidBearPx = bar?.closeMax != null && bar.c < bar.closeMax;
+  const hidBearRsi = bar?.rsi != null && bar.rsiMax != null && bar.rsi >= bar.rsiMax;
+  const any =
+    !!bar &&
+    (bar.bearishDivergence ||
+      bar.bullishDivergence ||
+      bar.hiddenBullish ||
+      bar.hiddenBearish);
 
   return (
     <Card>
@@ -581,14 +777,14 @@ function FormulaPanel({
         </div>
       </CardHeader>
       <CardContent className="space-y-3 pt-3 text-sm">
-        <pre className="overflow-x-auto rounded-lg bg-background p-3 font-mono text-xs leading-relaxed text-muted-foreground">
-{`close_max = close.rolling(${lookback}).max().shift(1)
-rsi_max   = rsi.rolling(${lookback}).max().shift(1)
-bearish   = (close >= close_max) & (rsi < rsi_max)
-bullish   = (close <= close_min) & (rsi > rsi_min)`}
+        <pre className="max-w-full overflow-x-auto rounded-lg bg-background p-3 font-mono text-xs leading-relaxed text-muted-foreground">
+{`bearish = (close >= close_max) & (rsi < rsi_max)
+bullish = (close <= close_min) & (rsi > rsi_min)
+hid_bull = (close > close_min) & (rsi <= rsi_min)
+hid_bear = (close < close_max) & (rsi >= rsi_max)`}
         </pre>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Nến hiện tại được so với cực trị của {lookback} nến trước (không gồm chính nó). Bearish: giá tạo đỉnh mới nhưng RSI không. Bullish: giá tạo đáy mới nhưng RSI không.
+          Cực trị lấy trên {lookback} nến trước, không gồm nến hiện tại. Thường là đảo chiều. Ẩn là tiếp diễn: RSI lập cực trị mới còn giá thì không.
         </p>
         {bar ? (
           <div className="rounded-lg bg-background p-3 font-mono text-xs">
@@ -596,12 +792,14 @@ bullish   = (close <= close_min) & (rsi > rsi_min)`}
             <Row ok={rsiWeak} label="rsi < rsi_max" left={formatRsi(bar.rsi)} right={formatRsi(bar.rsiMax)} />
             <Row ok={closeLow} label="close ≤ close_min" left={formatPrice(bar.c)} right={formatPrice(bar.closeMin ?? NaN)} />
             <Row ok={rsiStrong} label="rsi > rsi_min" left={formatRsi(bar.rsi)} right={formatRsi(bar.rsiMin)} />
-            <div className="mt-2 flex gap-2">
-              {bar.bearishDivergence ? <Badge variant="bear">bearish_divergence</Badge> : null}
-              {bar.bullishDivergence ? <Badge variant="bull">bullish_divergence</Badge> : null}
-              {!bar.bearishDivergence && !bar.bullishDivergence ? (
-                <span className="text-muted-foreground">Không kích hoạt trên nến này</span>
-              ) : null}
+            <Row ok={!!hidBullPx && !!hidBullRsi} label="hidden bull" left={formatPrice(bar.c)} right={formatRsi(bar.rsi)} />
+            <Row ok={!!hidBearPx && !!hidBearRsi} label="hidden bear" left={formatPrice(bar.c)} right={formatRsi(bar.rsi)} />
+            <div className="mt-2 flex flex-wrap gap-2">
+              {bar.bearishDivergence ? <Badge variant="bear">bearish</Badge> : null}
+              {bar.bullishDivergence ? <Badge variant="bull">bullish</Badge> : null}
+              {bar.hiddenBullish ? <Badge variant="bull">hidden bull</Badge> : null}
+              {bar.hiddenBearish ? <Badge variant="bear">hidden bear</Badge> : null}
+              {!any ? <span className="text-muted-foreground">Không kích hoạt trên nến này</span> : null}
             </div>
           </div>
         ) : null}

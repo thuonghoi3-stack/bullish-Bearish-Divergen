@@ -10,10 +10,10 @@ export const SYMBOLS = [
 ] as const;
 
 export const INTERVALS = [
+  { id: "5m", label: "5m", ms: 5 * 60 * 1000 },
   { id: "15m", label: "15m", ms: 15 * 60 * 1000 },
   { id: "1h", label: "1H", ms: 60 * 60 * 1000 },
   { id: "4h", label: "4H", ms: 4 * 60 * 60 * 1000 },
-  { id: "1d", label: "1D", ms: 24 * 60 * 60 * 1000 },
 ] as const;
 
 export type SymbolId = (typeof SYMBOLS)[number]["id"];

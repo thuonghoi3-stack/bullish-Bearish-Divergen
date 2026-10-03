@@ -11,15 +11,19 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { Bar, Signal } from "@/lib/strategy";
+import type { Bar, FamilyFilter, Signal } from "@/lib/strategy";
 import { compactPrice, formatFullTime, formatPct, formatPrice, formatRsi, formatTime } from "@/lib/utils";
 
 type ChartRow = Bar & {
   i: number;
   bullMark: number | null;
   bearMark: number | null;
+  hidBullMark: number | null;
+  hidBearMark: number | null;
   rsiBull: number | null;
   rsiBear: number | null;
+  rsiHidBull: number | null;
+  rsiHidBear: number | null;
 };
 
 function markDot(fill: string, prefix: string) {
@@ -38,10 +42,25 @@ function markDot(fill: string, prefix: string) {
   };
 }
 
+function ringDot(stroke: string, prefix: string) {
+  return (props: { cx?: number; cy?: number; value?: unknown; index?: number }) => {
+    const { cx, cy, value, index } = props;
+    const k = `${prefix}-${index ?? cx ?? 0}`;
+    if (cx == null || cy == null || value == null) return <g key={k} />;
+    return (
+      <circle key={k} cx={cx} cy={cy} r={4.5} fill="var(--color-background)" stroke={stroke} strokeWidth={1.5} />
+    );
+  };
+}
+
 const bullPriceDot = markDot("var(--color-bull)", "bull-px");
 const bearPriceDot = markDot("var(--color-bear)", "bear-px");
 const bullRsiDot = markDot("var(--color-bull)", "bull-rsi");
 const bearRsiDot = markDot("var(--color-bear)", "bear-rsi");
+const hidBullPrice = ringDot("var(--color-bull)", "hb-px");
+const hidBearPrice = ringDot("var(--color-bear)", "hbr-px");
+const hidBullRsi = ringDot("var(--color-bull)", "hb-rsi");
+const hidBearRsi = ringDot("var(--color-bear)", "hbr-rsi");
 
 function PriceTooltip({
   active,
@@ -63,8 +82,10 @@ function PriceTooltip({
         <span className="text-muted-foreground">L {formatPrice(bar.l)}</span>
       </div>
       <div className="mt-1 font-mono tabular text-rsi">RSI {formatRsi(bar.rsi)}</div>
-      {bar.bullishDivergence ? <div className="mt-1 text-bull">Bullish divergence</div> : null}
-      {bar.bearishDivergence ? <div className="mt-1 text-bear">Bearish divergence</div> : null}
+      {bar.bullishDivergence ? <div className="mt-1 text-bull">Phân kỳ tăng thường</div> : null}
+      {bar.bearishDivergence ? <div className="mt-1 text-bear">Phân kỳ giảm thường</div> : null}
+      {bar.hiddenBullStart ? <div className="mt-1 text-bull">Phân kỳ tăng ẩn</div> : null}
+      {bar.hiddenBearStart ? <div className="mt-1 text-bear">Phân kỳ giảm ẩn</div> : null}
     </div>
   );
 }
@@ -75,6 +96,7 @@ export function DeskCharts({
   lookback,
   selected,
   range,
+  family,
   onSelectIndex,
   onHoverIndex,
 }: {
@@ -83,20 +105,27 @@ export function DeskCharts({
   lookback: number;
   selected: Signal | null;
   range: "recent" | "all";
+  family: FamilyFilter;
   onSelectIndex: (index: number) => void;
   onHoverIndex: (index: number | null) => void;
 }) {
+  const showRegular = family !== "hidden";
+  const showHidden = family !== "regular";
   const rows: ChartRow[] = useMemo(() => {
     const start = range === "recent" ? Math.max(0, bars.length - 140) : 0;
     return bars.slice(start).map((bar, offset) => ({
       ...bar,
       i: start + offset,
-      bullMark: bar.bullishDivergence ? bar.c : null,
-      bearMark: bar.bearishDivergence ? bar.c : null,
-      rsiBull: bar.bullishDivergence ? bar.rsi : null,
-      rsiBear: bar.bearishDivergence ? bar.rsi : null,
+      bullMark: showRegular && bar.bullishDivergence ? bar.c : null,
+      bearMark: showRegular && bar.bearishDivergence ? bar.c : null,
+      hidBullMark: showHidden && bar.hiddenBullStart ? bar.c : null,
+      hidBearMark: showHidden && bar.hiddenBearStart ? bar.c : null,
+      rsiBull: showRegular && bar.bullishDivergence ? bar.rsi : null,
+      rsiBear: showRegular && bar.bearishDivergence ? bar.rsi : null,
+      rsiHidBull: showHidden && bar.hiddenBullStart ? bar.rsi : null,
+      rsiHidBear: showHidden && bar.hiddenBearStart ? bar.rsi : null,
     }));
-  }, [bars, range]);
+  }, [bars, range, showRegular, showHidden]);
 
   const priceTicks = useMemo(() => {
     if (rows.length === 0) return [0];
@@ -221,6 +250,26 @@ export function DeskCharts({
               dot={bearPriceDot}
               activeDot={false}
             />
+            <Line
+              yAxisId="price"
+              type="linear"
+              dataKey="hidBullMark"
+              stroke="none"
+              legendType="none"
+              isAnimationActive={false}
+              dot={hidBullPrice}
+              activeDot={false}
+            />
+            <Line
+              yAxisId="price"
+              type="linear"
+              dataKey="hidBearMark"
+              stroke="none"
+              legendType="none"
+              isAnimationActive={false}
+              dot={hidBearPrice}
+              activeDot={false}
+            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -305,16 +354,41 @@ export function DeskCharts({
               dot={bearRsiDot}
               activeDot={false}
             />
+            <Line
+              yAxisId="rsi"
+              type="linear"
+              dataKey="rsiHidBull"
+              stroke="none"
+              legendType="none"
+              isAnimationActive={false}
+              dot={hidBullRsi}
+              activeDot={false}
+            />
+            <Line
+              yAxisId="rsi"
+              type="linear"
+              dataKey="rsiHidBear"
+              stroke="none"
+              legendType="none"
+              isAnimationActive={false}
+              dot={hidBearRsi}
+              activeDot={false}
+            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
       {selected ? (
         <p className="px-1 font-mono text-xs text-muted-foreground">
-          Cửa sổ lookback {lookback} · {formatFullTime(selected.t)} · giá {formatPrice(selected.close)} · RSI{" "}
-          {formatRsi(selected.rsi)} · +5 {formatPct(selected.ret5)}
+          Kim cương = thường · vòng = ẩn · lookback {lookback} · {formatFullTime(selected.t)} ·{" "}
+          {selected.kind === "hidden" ? "ẩn" : "thường"} · sức {selected.strength} · +5{" "}
+          {formatPct(selected.ret5)}
         </p>
-      ) : null}
+      ) : (
+        <p className="px-1 font-mono text-xs text-muted-foreground">
+          Kim cương = phân kỳ thường · vòng = nến mở đầu phân kỳ ẩn
+        </p>
+      )}
     </div>
   );
 }
